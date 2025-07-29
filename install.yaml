@@ -42,6 +42,4 @@ post_install_actions:
     echo ""
     echo "Note: Run 'ddev restart' if the command is not immediately available"
 
-# YAML anchors for common patterns
-yaml_read_files:
-  - web-build/Dockerfile.drupal-site-analyzer
+# YAML anchors for common patterns (removed - not needed)
