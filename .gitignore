@@ -1,0 +1,20 @@
+# Test artifacts
+tests/test-project/site-fields.json
+tests/test-project/*.csv
+tests/test-project/*.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Temporary files
+*.tmp
+*.temp
+*.log

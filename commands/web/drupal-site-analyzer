@@ -1,0 +1,21 @@
+#!/bin/bash
+
+## Description: Analyze Drupal site field structure
+## Usage: drupal-site-analyzer [flags]
+## Example: "ddev drupal-site-analyzer --entity-type node --bundle book --format json"
+## Flags: [{"Name":"format","Shorthand":"f","Usage":"Output format: json, csv, markdown (default: json)"},{"Name":"entity-type","Shorthand":"e","Usage":"Filter by entity type (e.g., node, media, paragraph)"},{"Name":"bundle","Shorthand":"b","Usage":"Filter by bundle (e.g., book, image)"},{"Name":"output","Shorthand":"o","Usage":"Output to file instead of stdout"},{"Name":"required-only","Shorthand":"r","Usage":"Only show required fields"},{"Name":"verbose","Shorthand":"v","Usage":"Verbose output"},{"Name":"version","Usage":"Show version information"}]
+
+# This is a wrapper for the drupal-site-analyzer command installed in the container
+
+# Check if we're running in the web container
+if [ ! -f /usr/local/bin/drupal-site-analyzer ]; then
+    echo "Error: drupal-site-analyzer not found in container"
+    echo "This command must be run using 'ddev drupal-site-analyzer'"
+    exit 1
+fi
+
+# Change to the project root to ensure proper path detection
+cd /var/www/html
+
+# Execute the analyzer with all passed arguments
+exec /usr/local/bin/drupal-site-analyzer "$@"

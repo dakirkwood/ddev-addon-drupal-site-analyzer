@@ -1,0 +1,47 @@
+# DDEV Drupal Site Analyzer Addon
+name: drupal-site-analyzer
+
+# This file defines the installation process for the addon
+# It will be processed by "ddev get" command
+
+# Pre-install messages
+pre_install_actions:
+  - |
+    #ddev-description:Drupal Site Analyzer Addon
+    echo "Installing Drupal Site Analyzer addon..."
+    echo "This addon provides the 'ddev drupal-site-analyzer' command for analyzing Drupal field structures"
+
+# Remove any existing files before installation
+remove_actions:
+  - commands/web/drupal-site-analyzer
+  - web-build/Dockerfile.drupal-site-analyzer
+
+# Project files to create
+project_files:
+  - commands/web/drupal-site-analyzer
+  - web-build/Dockerfile.drupal-site-analyzer
+
+# Global files (installed to ~/.ddev)
+global_files: []
+
+# Post-install messages and actions
+post_install_actions:
+  - |
+    #ddev-description:Installation complete
+    echo ""
+    echo "✅ Drupal Site Analyzer addon installed successfully!"
+    echo ""
+    echo "Usage: ddev drupal-site-analyzer [options]"
+    echo ""
+    echo "Examples:"
+    echo "  ddev drupal-site-analyzer --output site-fields.json"
+    echo "  ddev drupal-site-analyzer --entity-type node --bundle book"
+    echo "  ddev drupal-site-analyzer --format csv > fields.csv"
+    echo ""
+    echo "Run 'ddev drupal-site-analyzer --help' for all options"
+    echo ""
+    echo "Note: Run 'ddev restart' if the command is not immediately available"
+
+# YAML anchors for common patterns
+yaml_read_files:
+  - web-build/Dockerfile.drupal-site-analyzer

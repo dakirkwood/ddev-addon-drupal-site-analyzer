@@ -1,0 +1,640 @@
+# Dockerfile for Drupal Site Analyzer addon
+# This installs the analyzer script and its dependencies in the web container
+
+# Install jq for JSON processing
+RUN apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*
+
+# Create the analyzer script directly in the container
+RUN mkdir -p /usr/local/bin
+
+# Copy the analyzer script content
+COPY <<'ANALYZER_SCRIPT' /usr/local/bin/drupal-site-analyzer
+#!/bin/bash
+
+# Drupal Site Analyzer v1.0.0
+# Embedded version for DDEV addon
+# Extracts comprehensive field information from Drupal configuration files
+
+# Check bash version (requires 4.0+ for associative arrays)
+if [ "${BASH_VERSION%%.*}" -lt 4 ]; then
+    echo "Error: This script requires Bash 4.0 or higher"
+    echo "Current version: $BASH_VERSION"
+    exit 1
+fi
+
+set -euo pipefail
+
+# Default values
+FORMAT="json"
+ENTITY_TYPE=""
+BUNDLE=""
+OUTPUT_FILE=""
+REQUIRED_ONLY=false
+VERBOSE=false
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to display usage
+usage() {
+    cat << EOF
+Usage: drupal-site-analyzer [OPTIONS]
+
+Drupal Site Analyzer v1.0.0 - Extracts field information from Drupal configuration files
+
+OPTIONS:
+    -f, --format FORMAT       Output format: json, csv, markdown (default: json)
+    -e, --entity-type TYPE    Filter by entity type (e.g., node, media, paragraph)
+    -b, --bundle BUNDLE       Filter by bundle (e.g., book, image)
+    -o, --output FILE         Output to file instead of stdout
+    -r, --required-only       Only show required fields
+    -v, --verbose             Verbose output
+    -h, --help                Display this help message
+    --version                 Show version information
+
+EXAMPLES:
+    # Extract all fields as JSON
+    drupal-site-analyzer --format json
+
+    # Extract only node fields
+    drupal-site-analyzer --entity-type node
+
+    # Extract specific bundle
+    drupal-site-analyzer --entity-type node --bundle book
+
+    # Save to file
+    drupal-site-analyzer --output site-fields.json
+
+    # Get only required fields as CSV
+    drupal-site-analyzer --required-only --format csv
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--format)
+            FORMAT="$2"
+            shift 2
+            ;;
+        -e|--entity-type)
+            ENTITY_TYPE="$2"
+            shift 2
+            ;;
+        -b|--bundle)
+            BUNDLE="$2"
+            shift 2
+            ;;
+        -o|--output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        -r|--required-only)
+            REQUIRED_ONLY=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --version)
+            echo "Drupal Site Analyzer v1.0.0 (DDEV Addon)"
+            exit 0
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Function to log verbose messages
+log() {
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${YELLOW}[INFO]${NC} $1" >&2
+    fi
+}
+
+# Function to log errors
+error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+# Function to log success
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
+}
+
+# Detect Drupal root
+if [ -f "web/sites/default/settings.php" ]; then
+    DRUPAL_ROOT="web"
+    log "Detected Drupal root: web/"
+elif [ -f "docroot/sites/default/settings.php" ]; then
+    DRUPAL_ROOT="docroot"
+    log "Detected Drupal root: docroot/"
+elif [ -f "sites/default/settings.php" ]; then
+    DRUPAL_ROOT="."
+    log "Detected Drupal root: current directory"
+else
+    error "Could not detect Drupal root. Please run from Drupal project root."
+    exit 1
+fi
+
+# Detect config directory
+log "Detecting configuration directory..."
+CONFIG_DIR=""
+
+# Try to extract from settings.php
+if [ -f "$DRUPAL_ROOT/sites/default/settings.php" ]; then
+    CONFIG_DIR=$(grep -E "\\\$settings\['config_sync_directory'\]" "$DRUPAL_ROOT/sites/default/settings.php" | head -1 | sed "s/.*'\(.*\)'.*/\1/" || true)
+    
+    # Convert relative path if needed
+    if [[ "$CONFIG_DIR" == ../* ]]; then
+        CONFIG_DIR="${CONFIG_DIR#../}"
+    fi
+fi
+
+# Fallback to common locations
+if [ -z "$CONFIG_DIR" ] || [ ! -d "$CONFIG_DIR" ]; then
+    if [ -d "config/sync" ]; then
+        CONFIG_DIR="config/sync"
+    elif [ -d "config/default" ]; then
+        CONFIG_DIR="config/default"
+    else
+        error "Could not find configuration directory"
+        exit 1
+    fi
+fi
+
+log "Using configuration directory: $CONFIG_DIR"
+
+# Check if config directory exists
+if [ ! -d "$CONFIG_DIR" ]; then
+    error "Configuration directory not found: $CONFIG_DIR"
+    exit 1
+fi
+
+# Initialize data structures
+declare -A site_info
+declare -A bundles_data
+declare -A entity_counts
+declare -A field_counts
+
+# Function to extract value from YAML
+extract_yaml_value() {
+    local file=$1
+    local key=$2
+    local default=${3:-""}
+    
+    if [ -f "$file" ]; then
+        value=$(grep "^${key}:" "$file" | head -1 | sed "s/^${key}: *//; s/^['\"]//; s/['\"]$//" || echo "$default")
+        echo "${value:-$default}"
+    else
+        echo "$default"
+    fi
+}
+
+# Function to extract nested YAML value
+extract_nested_yaml_value() {
+    local file=$1
+    local parent_key=$2
+    local child_key=$3
+    local default=${4:-""}
+    
+    if [ -f "$file" ]; then
+        # Find the parent key and then look for the child key in the following lines
+        awk "/^${parent_key}:/ {found=1; next} found && /^  ${child_key}:/ {gsub(/^  ${child_key}: */, \"\"); gsub(/^['\"]/, \"\"); gsub(/['\"]$/, \"\"); print; exit} /^[^ ]/ && found {exit}" "$file" || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+# Extract site information
+log "Extracting site information..."
+
+# Get theme information
+THEME_CONFIG="$CONFIG_DIR/system.theme.yml"
+DEFAULT_THEME=$(extract_yaml_value "$THEME_CONFIG" "default" "")
+ADMIN_THEME=$(extract_yaml_value "$THEME_CONFIG" "admin" "")
+
+log "Default theme: $DEFAULT_THEME"
+log "Admin theme: $ADMIN_THEME"
+
+# Get breakpoints if theme exists
+BREAKPOINTS_JSON="{}"
+if [ -n "$DEFAULT_THEME" ]; then
+    BREAKPOINTS_FILE="$DRUPAL_ROOT/themes/*/${DEFAULT_THEME}.breakpoints.yml"
+    BREAKPOINTS_FILE=$(ls $BREAKPOINTS_FILE 2>/dev/null | head -1 || echo "")
+    
+    if [ -f "$BREAKPOINTS_FILE" ]; then
+        log "Found breakpoints file: $BREAKPOINTS_FILE"
+        
+        # Parse breakpoints into JSON format
+        BREAKPOINTS_JSON="{"
+        first=true
+        while IFS= read -r line; do
+            if [[ $line =~ ^[a-zA-Z] ]]; then
+                if [ "$first" = true ]; then
+                    first=false
+                else
+                    BREAKPOINTS_JSON+=","
+                fi
+                
+                # Extract breakpoint name
+                bp_name=$(echo "$line" | cut -d':' -f1 | sed 's/.*\.//')
+                BREAKPOINTS_JSON+="\"$bp_name\":{"
+                
+                # Extract label
+                label=$(grep -A1 "^$line" "$BREAKPOINTS_FILE" | grep "label:" | sed "s/.*label: *//; s/^['\"]//; s/['\"]$//")
+                BREAKPOINTS_JSON+="\"label\":\"$label\","
+                
+                # Extract mediaQuery
+                media=$(grep -A2 "^$line" "$BREAKPOINTS_FILE" | grep "mediaQuery:" | sed "s/.*mediaQuery: *//; s/^['\"]//; s/['\"]$//")
+                BREAKPOINTS_JSON+="\"mediaQuery\":\"$media\","
+                
+                # Extract weight
+                weight=$(grep -A3 "^$line" "$BREAKPOINTS_FILE" | grep "weight:" | sed "s/.*weight: *//")
+                BREAKPOINTS_JSON+="\"weight\":$weight}"
+            fi
+        done < "$BREAKPOINTS_FILE"
+        BREAKPOINTS_JSON+="}"
+    else
+        log "No breakpoints file found for theme: $DEFAULT_THEME"
+    fi
+fi
+
+# Extract entity and field information
+log "Discovering entity types and bundles..."
+
+# Find all entity types with fields
+ENTITY_TYPES=$(find "$CONFIG_DIR" -name "field.field.*" -type f 2>/dev/null | sed 's/.*field\.field\.\([^.]*\)\..*/\1/' | sort | uniq)
+
+if [ -z "$ENTITY_TYPES" ]; then
+    error "No field configuration files found in $CONFIG_DIR"
+    exit 1
+fi
+
+log "Found entity types: $(echo $ENTITY_TYPES | tr '\n' ' ')"
+
+# Initialize JSON output
+JSON_OUTPUT='{'
+JSON_OUTPUT+='"site_info":{'
+JSON_OUTPUT+='"config_directory":"'$CONFIG_DIR'",'
+JSON_OUTPUT+='"default_theme":"'$DEFAULT_THEME'",'
+JSON_OUTPUT+='"admin_theme":"'$ADMIN_THEME'",'
+JSON_OUTPUT+='"extraction_date":"'$(date -u +"%Y-%m-%d %H:%M:%S UTC")'",'
+JSON_OUTPUT+='"breakpoints":'$BREAKPOINTS_JSON','
+JSON_OUTPUT+='"entity_summary":{'
+
+# Process each entity type
+first_entity=true
+total_fields=0
+
+for entity_type in $ENTITY_TYPES; do
+    # Apply entity type filter if specified
+    if [ -n "$ENTITY_TYPE" ] && [ "$entity_type" != "$ENTITY_TYPE" ]; then
+        continue
+    fi
+    
+    log "Processing entity type: $entity_type"
+    
+    # Get bundles for this entity type
+    BUNDLES=$(find "$CONFIG_DIR" -name "field.field.$entity_type.*" -type f 2>/dev/null | cut -d'.' -f4 | sort | uniq)
+    
+    if [ -z "$BUNDLES" ]; then
+        log "No bundles found for entity type: $entity_type"
+        continue
+    fi
+    
+    bundle_count=0
+    entity_field_count=0
+    
+    for bundle in $BUNDLES; do
+        # Apply bundle filter if specified
+        if [ -n "$BUNDLE" ] && [ "$bundle" != "$BUNDLE" ]; then
+            continue
+        fi
+        
+        log "Processing bundle: $entity_type:$bundle"
+        bundle_count=$((bundle_count + 1))
+        
+        # Get fields for this bundle
+        FIELDS=$(find "$CONFIG_DIR" -name "field.field.$entity_type.$bundle.*" -type f 2>/dev/null | cut -d'.' -f5 | sort)
+        
+        field_count=0
+        required_fields=""
+        
+        for field_name in $FIELDS; do
+            field_count=$((field_count + 1))
+            entity_field_count=$((entity_field_count + 1))
+            total_fields=$((total_fields + 1))
+            
+            # Extract field information
+            field_file="$CONFIG_DIR/field.field.$entity_type.$bundle.$field_name.yml"
+            
+            if [ -f "$field_file" ]; then
+                # Get field properties
+                label=$(extract_yaml_value "$field_file" "label" "")
+                required=$(extract_yaml_value "$field_file" "required" "false")
+                translatable=$(extract_yaml_value "$field_file" "translatable" "false")
+                field_type=$(extract_yaml_value "$field_file" "field_type" "")
+                
+                # Check if required
+                if [ "$required" = "true" ]; then
+                    if [ -z "$required_fields" ]; then
+                        required_fields="\"$field_name\""
+                    else
+                        required_fields+=",\"$field_name\""
+                    fi
+                fi
+                
+                # Apply required-only filter if specified
+                if [ "$REQUIRED_ONLY" = true ] && [ "$required" != "true" ]; then
+                    continue
+                fi
+                
+                # Get storage information
+                storage_file="$CONFIG_DIR/field.storage.$entity_type.$field_name.yml"
+                storage_type=""
+                cardinality="1"
+                storage_settings=""
+                
+                if [ -f "$storage_file" ]; then
+                    storage_type=$(extract_yaml_value "$storage_file" "type" "")
+                    cardinality=$(extract_yaml_value "$storage_file" "cardinality" "1")
+                    
+                    # Extract settings as JSON object
+                    # This captures the settings block and converts it to JSON format
+                    storage_settings=$(awk '/^settings:/ {found=1; next} found && /^[^ ]/ {exit} found && /^  / {gsub(/^  /, ""); print}' "$storage_file" | \
+                        awk -F': ' '{gsub(/^[ ]+/, "", $1); gsub(/^[ ]+/, "", $2); if (NR>1) printf ", "; printf "\"%s\":\"%s\"", $1, $2}' | \
+                        sed 's/^/{/; s/$/}/' | \
+                        sed 's/:"\([0-9]*\)"/:\1/g; s/:"true"/:true/g; s/:"false"/:false/g' || echo "{}")
+                    # Handle empty settings
+                    if [ -z "$storage_settings" ] || [ "$storage_settings" = "{}" ]; then
+                        storage_settings="{}"
+                    fi
+                fi
+                
+                # Get form widget information
+                form_display_file="$CONFIG_DIR/core.entity_form_display.$entity_type.$bundle.default.yml"
+                form_widget=""
+                
+                if [ -f "$form_display_file" ]; then
+                    # Extract the widget type for this field
+                    form_widget=$(awk "/^  ${field_name}:/ {found=1; next} found && /^    type:/ {gsub(/^    type: */, \"\"); gsub(/^['\"]/, \"\"); gsub(/['\"]$/, \"\"); print; exit} /^  [^ ]/ && found {exit}" "$form_display_file" || echo "")
+                fi
+                
+                # Store field data
+                bundles_data["${entity_type}:${bundle}:${field_name}:label"]="$label"
+                bundles_data["${entity_type}:${bundle}:${field_name}:required"]="$required"
+                bundles_data["${entity_type}:${bundle}:${field_name}:translatable"]="$translatable"
+                bundles_data["${entity_type}:${bundle}:${field_name}:field_type"]="$field_type"
+                bundles_data["${entity_type}:${bundle}:${field_name}:storage_type"]="$storage_type"
+                bundles_data["${entity_type}:${bundle}:${field_name}:cardinality"]="$cardinality"
+                bundles_data["${entity_type}:${bundle}:${field_name}:storage_settings"]="$storage_settings"
+                bundles_data["${entity_type}:${bundle}:${field_name}:form_widget"]="$form_widget"
+            fi
+        done
+        
+        # Store bundle summary
+        entity_counts["${entity_type}:${bundle}:field_count"]=$field_count
+        entity_counts["${entity_type}:${bundle}:required_fields"]=$required_fields
+        
+        # Try to get URL pattern for nodes
+        url_pattern=""
+        if [ "$entity_type" = "node" ]; then
+            # Check for pathauto pattern
+            pathauto_file="$CONFIG_DIR/pathauto.pattern.$bundle.yml"
+            if [ -f "$pathauto_file" ]; then
+                url_pattern=$(extract_yaml_value "$pathauto_file" "pattern" "")
+            fi
+        fi
+        entity_counts["${entity_type}:${bundle}:url_pattern"]=$url_pattern
+    done
+    
+    # Add entity summary
+    if [ "$first_entity" = true ]; then
+        first_entity=false
+    else
+        JSON_OUTPUT+=','
+    fi
+    
+    JSON_OUTPUT+='"'$entity_type'":{"bundles":'$bundle_count',"total_fields":'$entity_field_count'}'
+done
+
+JSON_OUTPUT+='},'
+JSON_OUTPUT+='"total_fields":'$total_fields
+JSON_OUTPUT+='},'
+JSON_OUTPUT+='"bundles":{'
+
+# Function to output JSON format
+output_json() {
+    local first_bundle=true
+    
+    for entity_type in $ENTITY_TYPES; do
+        if [ -n "$ENTITY_TYPE" ] && [ "$entity_type" != "$ENTITY_TYPE" ]; then
+            continue
+        fi
+        
+        BUNDLES=$(find "$CONFIG_DIR" -name "field.field.$entity_type.*" -type f 2>/dev/null | cut -d'.' -f4 | sort | uniq)
+        
+        for bundle in $BUNDLES; do
+            if [ -n "$BUNDLE" ] && [ "$bundle" != "$BUNDLE" ]; then
+                continue
+            fi
+            
+            if [ "$first_bundle" = true ]; then
+                first_bundle=false
+            else
+                JSON_OUTPUT+=','
+            fi
+            
+            JSON_OUTPUT+='"'$entity_type':'$bundle'":{'
+            
+            # Add URL pattern if exists
+            url_pattern="${entity_counts[${entity_type}:${bundle}:url_pattern]}"
+            if [ -n "$url_pattern" ]; then
+                JSON_OUTPUT+='"url_pattern":"'$url_pattern'",'
+            fi
+            
+            # Add field count
+            field_count="${entity_counts[${entity_type}:${bundle}:field_count]}"
+            JSON_OUTPUT+='"field_count":'${field_count:-0}','
+            
+            # Add required fields
+            required_fields="${entity_counts[${entity_type}:${bundle}:required_fields]}"
+            JSON_OUTPUT+='"required_fields":['${required_fields:-}'],'
+            
+            # Add fields array
+            JSON_OUTPUT+='"fields":['
+            
+            FIELDS=$(find "$CONFIG_DIR" -name "field.field.$entity_type.$bundle.*" -type f 2>/dev/null | cut -d'.' -f5 | sort)
+            
+            local first_field=true
+            for field_name in $FIELDS; do
+                required="${bundles_data[${entity_type}:${bundle}:${field_name}:required]}"
+                
+                if [ "$REQUIRED_ONLY" = true ] && [ "$required" != "true" ]; then
+                    continue
+                fi
+                
+                if [ "$first_field" = true ]; then
+                    first_field=false
+                else
+                    JSON_OUTPUT+=','
+                fi
+                
+                JSON_OUTPUT+='{'
+                JSON_OUTPUT+='"field_name":"'$field_name'",'
+                JSON_OUTPUT+='"label":"'${bundles_data[${entity_type}:${bundle}:${field_name}:label]}'",'
+                JSON_OUTPUT+='"required":'${bundles_data[${entity_type}:${bundle}:${field_name}:required]}',"translatable":'${bundles_data[${entity_type}:${bundle}:${field_name}:translatable]}','
+                JSON_OUTPUT+='"field_type":"'${bundles_data[${entity_type}:${bundle}:${field_name}:field_type]}'",'
+                JSON_OUTPUT+='"storage_type":"'${bundles_data[${entity_type}:${bundle}:${field_name}:storage_type]}'",'
+                JSON_OUTPUT+='"cardinality":'${bundles_data[${entity_type}:${bundle}:${field_name}:cardinality]}','
+                JSON_OUTPUT+='"storage_settings":'${bundles_data[${entity_type}:${bundle}:${field_name}:storage_settings]:-"{}"}',"form_widget":"'${bundles_data[${entity_type}:${bundle}:${field_name}:form_widget]}'"'
+                JSON_OUTPUT+='}'
+            done
+            
+            JSON_OUTPUT+=']}'
+        done
+    done
+    
+    JSON_OUTPUT+='}}'
+    
+    # Output to file or stdout
+    if [ -n "$OUTPUT_FILE" ]; then
+        echo "$JSON_OUTPUT" | jq . > "$OUTPUT_FILE"
+        success "Output written to: $OUTPUT_FILE"
+    else
+        echo "$JSON_OUTPUT" | jq .
+    fi
+}
+
+# Function to output CSV format
+output_csv() {
+    local csv_output="entity:bundle,field_name,label,required,translatable,field_type,storage_type,cardinality,storage_settings,form_widget"
+    
+    for entity_type in $ENTITY_TYPES; do
+        if [ -n "$ENTITY_TYPE" ] && [ "$entity_type" != "$ENTITY_TYPE" ]; then
+            continue
+        fi
+        
+        BUNDLES=$(find "$CONFIG_DIR" -name "field.field.$entity_type.*" -type f 2>/dev/null | cut -d'.' -f4 | sort | uniq)
+        
+        for bundle in $BUNDLES; do
+            if [ -n "$BUNDLE" ] && [ "$bundle" != "$BUNDLE" ]; then
+                continue
+            fi
+            
+            FIELDS=$(find "$CONFIG_DIR" -name "field.field.$entity_type.$bundle.*" -type f 2>/dev/null | cut -d'.' -f5 | sort)
+            
+            for field_name in $FIELDS; do
+                required="${bundles_data[${entity_type}:${bundle}:${field_name}:required]}"
+                
+                if [ "$REQUIRED_ONLY" = true ] && [ "$required" != "true" ]; then
+                    continue
+                fi
+                
+                csv_output+="\n${entity_type}:${bundle},${field_name},${bundles_data[${entity_type}:${bundle}:${field_name}:label]},${bundles_data[${entity_type}:${bundle}:${field_name}:required]},${bundles_data[${entity_type}:${bundle}:${field_name}:translatable]},${bundles_data[${entity_type}:${bundle}:${field_name}:field_type]},${bundles_data[${entity_type}:${bundle}:${field_name}:storage_type]},${bundles_data[${entity_type}:${bundle}:${field_name}:cardinality]},\"${bundles_data[${entity_type}:${bundle}:${field_name}:storage_settings]:-{}}\",${bundles_data[${entity_type}:${bundle}:${field_name}:form_widget]}"
+            done
+        done
+    done
+    
+    # Output to file or stdout
+    if [ -n "$OUTPUT_FILE" ]; then
+        echo -e "$csv_output" > "$OUTPUT_FILE"
+        success "Output written to: $OUTPUT_FILE"
+    else
+        echo -e "$csv_output"
+    fi
+}
+
+# Function to output Markdown format
+output_markdown() {
+    local md_output="# Drupal Site Field Analysis\n\n"
+    md_output+="**Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")\n"
+    md_output+="**Config Directory:** $CONFIG_DIR\n"
+    md_output+="**Default Theme:** $DEFAULT_THEME\n"
+    md_output+="**Admin Theme:** $ADMIN_THEME\n\n"
+    
+    for entity_type in $ENTITY_TYPES; do
+        if [ -n "$ENTITY_TYPE" ] && [ "$entity_type" != "$ENTITY_TYPE" ]; then
+            continue
+        fi
+        
+        BUNDLES=$(find "$CONFIG_DIR" -name "field.field.$entity_type.*" -type f 2>/dev/null | cut -d'.' -f4 | sort | uniq)
+        
+        for bundle in $BUNDLES; do
+            if [ -n "$BUNDLE" ] && [ "$bundle" != "$BUNDLE" ]; then
+                continue
+            fi
+            
+            md_output+="## ${entity_type}:${bundle}\n\n"
+            
+            # Add URL pattern if exists
+            url_pattern="${entity_counts[${entity_type}:${bundle}:url_pattern]}"
+            if [ -n "$url_pattern" ]; then
+                md_output+="**URL Pattern:** \`$url_pattern\`\n\n"
+            fi
+            
+            md_output+="| Field Name | Label | Required | Translatable | Field Type | Storage Type | Cardinality | Storage Settings | Form Widget |\n"
+            md_output+="|------------|-------|----------|--------------|------------|--------------|-------------|------------------|-------------|\n"
+            
+            FIELDS=$(find "$CONFIG_DIR" -name "field.field.$entity_type.$bundle.*" -type f 2>/dev/null | cut -d'.' -f5 | sort)
+            
+            for field_name in $FIELDS; do
+                required="${bundles_data[${entity_type}:${bundle}:${field_name}:required]}"
+                
+                if [ "$REQUIRED_ONLY" = true ] && [ "$required" != "true" ]; then
+                    continue
+                fi
+                
+                md_output+="| $field_name | ${bundles_data[${entity_type}:${bundle}:${field_name}:label]} | ${bundles_data[${entity_type}:${bundle}:${field_name}:required]} | ${bundles_data[${entity_type}:${bundle}:${field_name}:translatable]} | ${bundles_data[${entity_type}:${bundle}:${field_name}:field_type]} | ${bundles_data[${entity_type}:${bundle}:${field_name}:storage_type]} | ${bundles_data[${entity_type}:${bundle}:${field_name}:cardinality]} | \`${bundles_data[${entity_type}:${bundle}:${field_name}:storage_settings]:-{}}\` | ${bundles_data[${entity_type}:${bundle}:${field_name}:form_widget]} |\n"
+            done
+            
+            md_output+="\n"
+        done
+    done
+    
+    # Output to file or stdout
+    if [ -n "$OUTPUT_FILE" ]; then
+        echo -e "$md_output" > "$OUTPUT_FILE"
+        success "Output written to: $OUTPUT_FILE"
+    else
+        echo -e "$md_output"
+    fi
+}
+
+# Output field data in requested format
+case $FORMAT in
+    json)
+        output_json
+        ;;
+    csv)
+        output_csv
+        ;;
+    markdown)
+        output_markdown
+        ;;
+    *)
+        error "Unknown format: $FORMAT"
+        exit 1
+        ;;
+esac
+
+success "Analysis complete!"
+ANALYZER_SCRIPT
+
+# Make the script executable
+RUN chmod +x /usr/local/bin/drupal-site-analyzer
+
+# Create a symlink for backward compatibility
+RUN ln -sf /usr/local/bin/drupal-site-analyzer /usr/bin/drupal-site-analyzer
