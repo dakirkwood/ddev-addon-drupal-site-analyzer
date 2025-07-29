@@ -11,7 +11,7 @@ RUN mkdir -p /usr/local/bin
 COPY <<'ANALYZER_SCRIPT' /usr/local/bin/drupal-site-analyzer
 #!/bin/bash
 
-# Drupal Site Analyzer v1.0.3
+# Drupal Site Analyzer v1.0.4
 # Embedded version for DDEV addon
 # Extracts comprehensive field information from Drupal configuration files
 
@@ -43,7 +43,7 @@ usage() {
     cat << EOF
 Usage: drupal-site-analyzer [OPTIONS]
 
-Drupal Site Analyzer v1.0.3 - Extracts field information from Drupal configuration files
+Drupal Site Analyzer v1.0.4 - Extracts field information from Drupal configuration files
 
 OPTIONS:
     -f, --format FORMAT       Output format: json, csv, markdown (default: json)
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version)
-            echo "Drupal Site Analyzer v1.0.3 (DDEV Addon)"
+            echo "Drupal Site Analyzer v1.0.4 (DDEV Addon)"
             exit 0
             ;;
         -h|--help)
@@ -238,8 +238,8 @@ log "Admin theme: $ADMIN_THEME"
 # Get breakpoints if theme exists
 BREAKPOINTS_JSON="{}"
 if [ -n "$DEFAULT_THEME" ]; then
-    BREAKPOINTS_FILE="$DRUPAL_ROOT/themes/*/${DEFAULT_THEME}.breakpoints.yml"
-    BREAKPOINTS_FILE=$(ls $BREAKPOINTS_FILE 2>/dev/null | head -1 || echo "")
+    # Use find to locate breakpoints file in any subdirectory
+    BREAKPOINTS_FILE=$(find "$DRUPAL_ROOT/themes" -name "${DEFAULT_THEME}.breakpoints.yml" -type f 2>/dev/null | head -1 || echo "")
     
     if [ -f "$BREAKPOINTS_FILE" ]; then
         log "Found breakpoints file: $BREAKPOINTS_FILE"
@@ -260,15 +260,23 @@ if [ -n "$DEFAULT_THEME" ]; then
                 BREAKPOINTS_JSON+="\"$bp_name\":{"
                 
                 # Extract label
-                label=$(grep -A1 "^$line" "$BREAKPOINTS_FILE" | grep "label:" | sed "s/.*label: *//; s/^['\"]//; s/['\"]$//")
+                label=$(grep -A1 "^$line" "$BREAKPOINTS_FILE" | grep "label:" | sed "s/.*label: *//; s/^['\"]//; s/['\"]$//" || echo "")
+                # Escape quotes in label
+                label=$(echo "$label" | sed 's/"/\\"/g')
                 BREAKPOINTS_JSON+="\"label\":\"$label\","
                 
                 # Extract mediaQuery
-                media=$(grep -A2 "^$line" "$BREAKPOINTS_FILE" | grep "mediaQuery:" | sed "s/.*mediaQuery: *//; s/^['\"]//; s/['\"]$//")
+                media=$(grep -A2 "^$line" "$BREAKPOINTS_FILE" | grep "mediaQuery:" | sed "s/.*mediaQuery: *//; s/^['\"]//; s/['\"]$//" || echo "")
+                # Escape quotes and backslashes in media query
+                media=$(echo "$media" | sed 's/\\/\\\\/g; s/"/\\"/g')
                 BREAKPOINTS_JSON+="\"mediaQuery\":\"$media\","
                 
                 # Extract weight
-                weight=$(grep -A3 "^$line" "$BREAKPOINTS_FILE" | grep "weight:" | sed "s/.*weight: *//")
+                weight=$(grep -A3 "^$line" "$BREAKPOINTS_FILE" | grep "weight:" | sed "s/.*weight: *//" || echo "0")
+                # Ensure weight is a valid number
+                if ! [[ "$weight" =~ ^-?[0-9]+$ ]]; then
+                    weight="0"
+                fi
                 BREAKPOINTS_JSON+="\"weight\":$weight}"
             fi
         done < "$BREAKPOINTS_FILE"

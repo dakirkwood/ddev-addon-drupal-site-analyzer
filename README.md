@@ -247,6 +247,12 @@ cd ddev-addon-drupal-site-analyzer/tests
 
 ## Version History
 
+- **v1.0.4**: Breakpoints detection and JSON stability fixes
+  - Fixed breakpoints file detection for themes in subdirectories (e.g., themes/custom/mytheme)
+  - Added proper escaping for breakpoint labels and media queries
+  - Improved JSON validity with better error handling for missing values
+  - Enhanced weight extraction with numeric validation
+
 - **v1.0.3**: Enhanced error handling
   - Added intelligent error messages for invalid options:
     - Shows available entity types when invalid type is specified
