@@ -247,6 +247,12 @@ cd ddev-addon-drupal-site-analyzer/tests
 
 ## Version History
 
+- **v1.0.5**: Storage settings fix and improved theme detection
+  - Applied storage_settings fix from production to avoid JSON parsing errors
+  - Simplified complex field settings to prevent JSON corruption
+  - Added multiple fallback methods for theme path detection
+  - Improved compatibility with different Drupal site structures
+
 - **v1.0.4**: Breakpoints detection and JSON stability fixes
   - Fixed breakpoints file detection for themes in subdirectories (e.g., themes/custom/mytheme)
   - Added proper escaping for breakpoint labels and media queries

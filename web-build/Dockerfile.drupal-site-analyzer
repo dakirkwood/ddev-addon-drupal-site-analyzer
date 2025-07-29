@@ -11,7 +11,7 @@ RUN mkdir -p /usr/local/bin
 COPY <<'ANALYZER_SCRIPT' /usr/local/bin/drupal-site-analyzer
 #!/bin/bash
 
-# Drupal Site Analyzer v1.0.4
+# Drupal Site Analyzer v1.0.5
 # Embedded version for DDEV addon
 # Extracts comprehensive field information from Drupal configuration files
 
@@ -43,7 +43,7 @@ usage() {
     cat << EOF
 Usage: drupal-site-analyzer [OPTIONS]
 
-Drupal Site Analyzer v1.0.4 - Extracts field information from Drupal configuration files
+Drupal Site Analyzer v1.0.5 - Extracts field information from Drupal configuration files
 
 OPTIONS:
     -f, --format FORMAT       Output format: json, csv, markdown (default: json)
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version)
-            echo "Drupal Site Analyzer v1.0.4 (DDEV Addon)"
+            echo "Drupal Site Analyzer v1.0.5 (DDEV Addon)"
             exit 0
             ;;
         -h|--help)
@@ -224,6 +224,43 @@ extract_nested_yaml_value() {
     fi
 }
 
+# Function to get theme path with multiple fallback methods
+get_theme_path() {
+    local drupal_root="$1"
+    local theme_name="$2"
+    
+    # Method 1: Try using drush if available
+    if command -v drush &> /dev/null; then
+        local theme_path=$(drush eval "echo \\Drupal::theme()->getActiveTheme()->getPath();" 2>/dev/null || echo "")
+        if [ -n "$theme_path" ]; then
+            echo "$drupal_root/$theme_path"
+            return 0
+        fi
+    fi
+    
+    # Method 2: Search for theme .info.yml file
+    if [ -n "$theme_name" ]; then
+        local theme_info=$(find "$drupal_root/themes" -name "${theme_name}.info.yml" -type f 2>/dev/null | head -1)
+        if [ -n "$theme_info" ]; then
+            echo "$(dirname "$theme_info")"
+            return 0
+        fi
+    fi
+    
+    # Method 3: Common theme locations
+    if [ -n "$theme_name" ]; then
+        for dir in "themes/custom" "themes/contrib" "themes"; do
+            if [ -d "$drupal_root/$dir/$theme_name" ]; then
+                echo "$drupal_root/$dir/$theme_name"
+                return 0
+            fi
+        done
+    fi
+    
+    # Not found
+    return 1
+}
+
 # Extract site information
 log "Extracting site information..."
 
@@ -238,8 +275,14 @@ log "Admin theme: $ADMIN_THEME"
 # Get breakpoints if theme exists
 BREAKPOINTS_JSON="{}"
 if [ -n "$DEFAULT_THEME" ]; then
-    # Use find to locate breakpoints file in any subdirectory
-    BREAKPOINTS_FILE=$(find "$DRUPAL_ROOT/themes" -name "${DEFAULT_THEME}.breakpoints.yml" -type f 2>/dev/null | head -1 || echo "")
+    # Get theme path using our helper function
+    if THEME_PATH=$(get_theme_path "$DRUPAL_ROOT" "$DEFAULT_THEME"); then
+        BREAKPOINTS_FILE="$THEME_PATH/${DEFAULT_THEME}.breakpoints.yml"
+        log "Looking for breakpoints at: $BREAKPOINTS_FILE"
+    else
+        BREAKPOINTS_FILE=""
+        log "Could not determine theme path for: $DEFAULT_THEME"
+    fi
     
     if [ -f "$BREAKPOINTS_FILE" ]; then
         log "Found breakpoints file: $BREAKPOINTS_FILE"
@@ -418,17 +461,13 @@ for entity_type in $ENTITY_TYPES; do
                     cardinality=$(extract_yaml_value "$storage_file" "cardinality" "1")
                     
                     # Extract settings as JSON object
-                    # For complex settings like allowed_values arrays, we need special handling
+                    # For complex settings like allowed_values arrays, just return simplified object
+                    # This avoids JSON parsing errors
                     if grep -q "allowed_values:" "$storage_file" 2>/dev/null; then
-                        # Complex list field with allowed values - extract key info only
-                        storage_settings='{"type":"list_with_allowed_values"}'
-                    elif grep -A10 "^settings:" "$storage_file" | grep -q "^    " 2>/dev/null; then
-                        # Nested settings - too complex for simple parsing
-                        storage_settings='{"type":"complex_settings"}'
+                        storage_settings='{"note": "Complex settings omitted"}'
                     else
-                        # Simple settings that can be parsed
                         storage_settings=$(awk '/^settings:/ {found=1; next} found && /^[^ ]/ {exit} found && /^  / {gsub(/^  /, ""); print}' "$storage_file" | \
-                            awk -F': ' 'NF==2 {gsub(/^[ ]+/, "", $1); gsub(/^[ ]+/, "", $2); if (NR>1) printf ", "; printf "\"%s\":\"%s\"", $1, $2}' | \
+                            awk -F': ' '{gsub(/^[ ]+/, "", $1); gsub(/^[ ]+/, "", $2); if (NR>1) printf ", "; printf "\"%s\":\"%s\"", $1, $2}' | \
                             sed 's/^/{/; s/$/}/' | \
                             sed 's/:"\([0-9]*\)"/:\1/g; s/:"true"/:true/g; s/:"false"/:false/g' || echo "{}")
                     fi
