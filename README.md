@@ -247,6 +247,13 @@ cd ddev-addon-drupal-site-analyzer/tests
 
 ## Version History
 
+- **v1.0.2**: Bug fix release
+  - Fixed JSON parsing errors for complex field storage settings
+  - Improved handling of list fields with allowed_values arrays
+  - Better error handling for deeply nested YAML structures
+
+- **v1.0.1**: Previous release
+
 - **v1.0.0**: Initial release
   - Comprehensive field extraction
   - Multiple output formats

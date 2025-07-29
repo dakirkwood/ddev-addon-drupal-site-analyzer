@@ -11,7 +11,7 @@ RUN mkdir -p /usr/local/bin
 COPY <<'ANALYZER_SCRIPT' /usr/local/bin/drupal-site-analyzer
 #!/bin/bash
 
-# Drupal Site Analyzer v1.0.0
+# Drupal Site Analyzer v1.0.2
 # Embedded version for DDEV addon
 # Extracts comprehensive field information from Drupal configuration files
 
@@ -43,7 +43,7 @@ usage() {
     cat << EOF
 Usage: drupal-site-analyzer [OPTIONS]
 
-Drupal Site Analyzer v1.0.0 - Extracts field information from Drupal configuration files
+Drupal Site Analyzer v1.0.2 - Extracts field information from Drupal configuration files
 
 OPTIONS:
     -f, --format FORMAT       Output format: json, csv, markdown (default: json)
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version)
-            echo "Drupal Site Analyzer v1.0.0 (DDEV Addon)"
+            echo "Drupal Site Analyzer v1.0.2 (DDEV Addon)"
             exit 0
             ;;
         -h|--help)
@@ -372,13 +372,23 @@ for entity_type in $ENTITY_TYPES; do
                     cardinality=$(extract_yaml_value "$storage_file" "cardinality" "1")
                     
                     # Extract settings as JSON object
-                    # This captures the settings block and converts it to JSON format
-                    storage_settings=$(awk '/^settings:/ {found=1; next} found && /^[^ ]/ {exit} found && /^  / {gsub(/^  /, ""); print}' "$storage_file" | \
-                        awk -F': ' '{gsub(/^[ ]+/, "", $1); gsub(/^[ ]+/, "", $2); if (NR>1) printf ", "; printf "\"%s\":\"%s\"", $1, $2}' | \
-                        sed 's/^/{/; s/$/}/' | \
-                        sed 's/:"\([0-9]*\)"/:\1/g; s/:"true"/:true/g; s/:"false"/:false/g' || echo "{}")
+                    # For complex settings like allowed_values arrays, we need special handling
+                    if grep -q "allowed_values:" "$storage_file" 2>/dev/null; then
+                        # Complex list field with allowed values - extract key info only
+                        storage_settings='{"type":"list_with_allowed_values"}'
+                    elif grep -A10 "^settings:" "$storage_file" | grep -q "^    " 2>/dev/null; then
+                        # Nested settings - too complex for simple parsing
+                        storage_settings='{"type":"complex_settings"}'
+                    else
+                        # Simple settings that can be parsed
+                        storage_settings=$(awk '/^settings:/ {found=1; next} found && /^[^ ]/ {exit} found && /^  / {gsub(/^  /, ""); print}' "$storage_file" | \
+                            awk -F': ' 'NF==2 {gsub(/^[ ]+/, "", $1); gsub(/^[ ]+/, "", $2); if (NR>1) printf ", "; printf "\"%s\":\"%s\"", $1, $2}' | \
+                            sed 's/^/{/; s/$/}/' | \
+                            sed 's/:"\([0-9]*\)"/:\1/g; s/:"true"/:true/g; s/:"false"/:false/g' || echo "{}")
+                    fi
+                    
                     # Handle empty settings
-                    if [ -z "$storage_settings" ] || [ "$storage_settings" = "{}" ]; then
+                    if [ -z "$storage_settings" ] || [ "$storage_settings" = "{}" ] || [ "$storage_settings" = "{}" ]; then
                         storage_settings="{}"
                     fi
                 fi
