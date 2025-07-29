@@ -11,7 +11,7 @@ RUN mkdir -p /usr/local/bin
 COPY <<'ANALYZER_SCRIPT' /usr/local/bin/drupal-site-analyzer
 #!/bin/bash
 
-# Drupal Site Analyzer v1.0.2
+# Drupal Site Analyzer v1.0.3
 # Embedded version for DDEV addon
 # Extracts comprehensive field information from Drupal configuration files
 
@@ -43,7 +43,7 @@ usage() {
     cat << EOF
 Usage: drupal-site-analyzer [OPTIONS]
 
-Drupal Site Analyzer v1.0.2 - Extracts field information from Drupal configuration files
+Drupal Site Analyzer v1.0.3 - Extracts field information from Drupal configuration files
 
 OPTIONS:
     -f, --format FORMAT       Output format: json, csv, markdown (default: json)
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version)
-            echo "Drupal Site Analyzer v1.0.2 (DDEV Addon)"
+            echo "Drupal Site Analyzer v1.0.3 (DDEV Addon)"
             exit 0
             ;;
         -h|--help)
@@ -132,6 +132,13 @@ error() {
 success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
+
+# Validate format option
+if [[ ! "$FORMAT" =~ ^(json|csv|markdown)$ ]]; then
+    error "Invalid format: $FORMAT"
+    echo "Valid formats are: json, csv, markdown" >&2
+    exit 1
+fi
 
 # Detect Drupal root
 if [ -f "web/sites/default/settings.php" ]; then
@@ -283,6 +290,37 @@ if [ -z "$ENTITY_TYPES" ]; then
 fi
 
 log "Found entity types: $(echo $ENTITY_TYPES | tr '\n' ' ')"
+
+# Validate entity type if specified
+if [ -n "$ENTITY_TYPE" ]; then
+    if ! echo "$ENTITY_TYPES" | grep -q "^$ENTITY_TYPE$"; then
+        error "Entity type '$ENTITY_TYPE' not found in this site"
+        echo "Available entity types: $(echo $ENTITY_TYPES | tr '\n' ' ')" >&2
+        exit 1
+    fi
+fi
+
+# Validate bundle if specified
+if [ -n "$BUNDLE" ]; then
+    if [ -z "$ENTITY_TYPE" ]; then
+        error "Bundle filter requires --entity-type to be specified"
+        exit 1
+    fi
+    
+    # Check if bundle exists for the entity type
+    BUNDLE_EXISTS=$(find "$CONFIG_DIR" -name "field.field.$ENTITY_TYPE.$BUNDLE.*" -type f 2>/dev/null | head -1)
+    if [ -z "$BUNDLE_EXISTS" ]; then
+        # Get available bundles for this entity type
+        AVAILABLE_BUNDLES=$(find "$CONFIG_DIR" -name "field.field.$ENTITY_TYPE.*" -type f 2>/dev/null | cut -d'.' -f4 | sort | uniq)
+        error "Bundle '$BUNDLE' not found for entity type '$ENTITY_TYPE'"
+        if [ -n "$AVAILABLE_BUNDLES" ]; then
+            echo "Available bundles for $ENTITY_TYPE: $(echo $AVAILABLE_BUNDLES | tr '\n' ' ')" >&2
+        else
+            echo "No bundles found for entity type '$ENTITY_TYPE'" >&2
+        fi
+        exit 1
+    fi
+fi
 
 # Initialize JSON output
 JSON_OUTPUT='{'

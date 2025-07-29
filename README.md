@@ -247,6 +247,13 @@ cd ddev-addon-drupal-site-analyzer/tests
 
 ## Version History
 
+- **v1.0.3**: Enhanced error handling
+  - Added intelligent error messages for invalid options:
+    - Shows available entity types when invalid type is specified
+    - Shows available bundles when invalid bundle is specified
+    - Validates format option and shows valid formats
+    - Requires entity type when using bundle filter
+
 - **v1.0.2**: Bug fix release
   - Fixed JSON parsing errors for complex field storage settings
   - Improved handling of list fields with allowed_values arrays
